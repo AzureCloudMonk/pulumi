@@ -271,6 +271,31 @@ func (ctx *Context) ReadResource(
 		options.Parent = ctx.stack
 	}
 
+	// Before anything else, if there are transformations registered, give them a chance to run to modify the
+	// user-provided properties and options assigned to this resource.
+	transformations := options.Transformations
+	if options.Parent != nil {
+		transformations = append(transformations, options.Parent.getTransformations()...)
+	}
+	for _, transformation := range transformations {
+		args := &ResourceTransformationArgs{
+			Resource: resource,
+			Type:     t,
+			Name:     name,
+			Props:    props,
+			Opts:     options,
+		}
+
+		res := transformation(args)
+		if res != nil {
+			if res.Opts.Parent.URN() != options.Parent.URN() {
+				return errors.New("transformations cannot currently be used to change the `parent` of a resource")
+			}
+			props = res.Props
+			options = res.Opts
+		}
+	}
+
 	// Collapse aliases to URNs.
 	aliasURNs, err := ctx.collapseAliases(options.Aliases, t, name, options.Parent)
 	if err != nil {
@@ -286,7 +311,7 @@ func (ctx *Context) ReadResource(
 	providers := mergeProviders(t, options.Parent, options.Provider, options.Providers)
 
 	// Create resolvers for the resource's outputs.
-	res := makeResourceState(t, name, resource, providers, aliasURNs)
+	res := makeResourceState(t, name, resource, providers, aliasURNs, transformations)
 
 	// Kick off the resource read operation.  This will happen asynchronously and resolve the above properties.
 	go func() {
@@ -431,7 +456,7 @@ func (ctx *Context) RegisterResource(
 	providers := mergeProviders(t, options.Parent, options.Provider, options.Providers)
 
 	// Create resolvers for the resource's outputs.
-	res := makeResourceState(t, name, resource, providers, aliasURNs)
+	res := makeResourceState(t, name, resource, providers, aliasURNs, transformations)
 
 	// Kick off the resource registration.  If we are actually performing a deployment, the resulting properties
 	// will be resolved asynchronously as the RPC operation completes.  If we're just planning, values won't resolve.
@@ -491,10 +516,11 @@ func (ctx *Context) RegisterComponentResource(
 
 // resourceState contains the results of a resource registration operation.
 type resourceState struct {
-	outputs   map[string]Output
-	providers map[string]ProviderResource
-	aliases   []URNOutput
-	name      string
+	outputs         map[string]Output
+	providers       map[string]ProviderResource
+	aliases         []URNOutput
+	name            string
+	transformations []ResourceTransformation
 }
 
 // checks all possible sources of providers and merges them with preference given to the most specific
@@ -558,7 +584,7 @@ func (ctx *Context) collapseAliases(aliases []Alias, t, name string, parent Reso
 // makeResourceState creates a set of resolvers that we'll use to finalize state, for URNs, IDs, and output
 // properties.
 func makeResourceState(t, name string, resourceV Resource, providers map[string]ProviderResource,
-	aliases []URNOutput) *resourceState {
+	aliases []URNOutput, transformations []ResourceTransformation) *resourceState {
 
 	resource := reflect.ValueOf(resourceV)
 
@@ -628,6 +654,8 @@ func makeResourceState(t, name string, resourceV Resource, providers map[string]
 	rs.name = name
 	state.aliases = aliases
 	rs.aliases = aliases
+	state.transformations = transformations
+	rs.transformations = transformations
 
 	return state
 }
